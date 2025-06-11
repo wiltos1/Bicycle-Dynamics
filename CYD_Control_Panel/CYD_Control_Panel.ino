@@ -13,10 +13,9 @@ constexpr uint8_t  XPT2046_MOSI    = 32;
 constexpr uint8_t  XPT2046_MISO    = 39;
 constexpr uint8_t  XPT2046_CLK     = 25;
 constexpr uint8_t  XPT2046_CS      = 33;
-constexpr bool     RERUN_CALIBRATE = false;
 
-#define RXD2 22  // (not used elsewhere, but kept for reference)
-#define TXD2 27  // (not used elsewhere, but kept for reference)
+#define RXD2 22
+#define TXD2 27
 
 // SD card chip‐select
 constexpr uint8_t  SD_CS           = 5;
@@ -26,47 +25,50 @@ constexpr uint32_t SAMPLING_FREQUENCY = 10;                // Hz
 constexpr uint32_t SAMPLE_INTERVAL_MS = 1000 / SAMPLING_FREQUENCY;
 
 unsigned long lastDataUpdate = 0;  // Timestamp of last update
-const unsigned long dataInterval = 1000;  // 1000 ms = 1 second
+const unsigned long dataInterval = 1000;  // Frequency of live data refresh on LCD
 
 //––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 // Globals
 //––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 // Display + touchscreen + UI
-XPT2046_Bitbang ts(XPT2046_MOSI, XPT2046_MISO, XPT2046_CLK, XPT2046_CS);
-TFT_eSPI       tft = TFT_eSPI();
-TFT_eSPI_Button buttons[6];
-Ticker         sampleTicker;
-File           logFile;
+XPT2046_Bitbang ts(XPT2046_MOSI, XPT2046_MISO, XPT2046_CLK, XPT2046_CS); // Initialize touchscreen
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSPI_Button buttons[6]; // Initialize buttons
+Ticker sampleTicker; // Ticker for sampling data at uniform frwquency
+File logFile;
 
-// UART to Nano (we’ll call this SerialNano).  We’ll map it to pins 22 (RX) and 27 (TX).
+// UART to Arduino Nano
 HardwareSerial SerialNano(2);
 
 // App state
 enum State { Home, Calibrate, Record };
-State CYD_State = Home;
+State CYD_State = Home; // Start in Home State
+
+enum Error { None, SD_Card, TS, IMU, UART};
+Error systemError = None;
 
 // Labels
 char homeLabels[2][11] = { "Calibrate", "Record" };
 char calLabels [3][12] = { "Cal Pitch", "Cal Roll", "Home" };
-char recLabels [3][24] =  { "Start New", "Stop&Save", "Home" };
+char recLabels [3][24] = { "Start New", "Stop&Save", "Home" };
 
-// Sensor data from Nano (14 values total)
+// Sensor data from Nano 
 float frontOriX, frontOriY, frontOriZ;
 float rearOriX,  rearOriY,  rearOriZ;
 float frontAccX, frontAccY, frontAccZ;
 float rearAccX,  rearAccY,  rearAccZ;
 float rpm_front, rpm_rear;
 
-// Pitch & roll biases (set via calibrateBike)
+// Pitch & roll biases 
 float pitchBias = 0.0f;
-float rollBias  = 0.0f;
+float rollBias = 0.0f;
 
 // Sampling & logging
 volatile bool sample_ready = false;
-bool record_data   = false;
+bool record_data = false; // When this is true we write data to a new file on the SD Card
 unsigned long packet_count = 0;
 
-// Forward declarations
+// Forward declarations of functions
 void drawHomeScreen();
 void drawCalibrationScreen();
 void drawRecordScreen();
@@ -79,52 +81,76 @@ void writeContext();
 void updateLiveData();
 void calibrateBike(int i);
 void calibrateSensors();
+void errorScreen();
 
 void setup() {
-  // Serial for debug
-  Serial.begin(57600);
+  Serial.begin(57600); // Initialize Serial Monitor
 
-  // _Hardware_ UART to Nano at 57600 baud, using pins RX=22, TX=27
-  SerialNano.begin(57600, SERIAL_8N1, 22, 27);
+  // Hardware_ UART to Nano at 57600 baud, using pins RX=22, TX=27
+  SerialNano.begin(57600, SERIAL_8N1, RXD2, TXD2);
 
   // Touchscreen & SPIFFS
   tft.init();
   tft.setRotation(1);
   SPI.begin();
   if (!SPIFFS.begin(true)) {
-    tft.fillScreen(TFT_RED);
-    tft.setCursor(10, 10);
-    tft.setTextColor(TFT_WHITE);
-    tft.println("SPIFFS mount failed!");
-    while (1);
+    systemError = TS;
   }
   ts.begin();
-  if (!ts.loadCalibration() || RERUN_CALIBRATE) {
+  if (!ts.loadCalibration()) { // Recalibrate the touchscreen if necessary
     ts.calibrate();
     ts.saveCalibration();
   }
-  pinMode(XPT2046_IRQ, INPUT);
-
+  pinMode(XPT2046_IRQ, INPUT); // This let's us use the touchscreen press as an input
+  tft.fillScreen(TFT_BLACK);
   // SD card
   if (!SD.begin(SD_CS)) {
-    tft.fillScreen(TFT_RED);
-    tft.setCursor(10, 10);
-    tft.setTextColor(TFT_WHITE);
-    tft.println("SD init failed!");
-    while (1);
+    systemError = SD_Card;
   }
 
+  int attempts = 0;
+  while (attempts < 10) {
+    SerialNano.write('E');
+    unsigned long start = millis();
+    while (!SerialNano.available() && millis() - start < 50);
+    char line[128];
+    size_t len = SerialNano.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[len] = '\0';
+
+    if (len == 0) {
+      attempts++;
+      delay(500);
+      continue;
+    }
+
+    if (strncmp(line, "ERROR", 5) == 0) {
+      systemError = IMU;
+      break;
+    }
+    else if (strncmp(line, "NO ERROR", 8) == 0) {
+      break;
+    }
+    attempts++;
+    delay(500);
+  }
+  if (attempts >= 10 && systemError == None) {
+    systemError = UART;
+  }
+
+  if (systemError != None) {
+    errorScreen();
+  }
   // Clear screen, run sensor calibration, then go to Home
-  tft.fillScreen(TFT_BLACK);
   calibrateSensors();
   drawHomeScreen();
 
-  // Start the sampling ticker (fires every SAMPLE_INTERVAL_MS ms)
+  // Start the sampling ticker
   sampleTicker.attach_ms(SAMPLE_INTERVAL_MS, sampleTick);
 }
 
+
 void loop() {
-  writeContext();
+  writeContext(); // This writes different text to the screen depending on the state, to help user interraction
 
   // If we’re in Record state, periodically update live data on screen
   if (CYD_State == Record) {
@@ -135,7 +161,7 @@ void loop() {
     }
   }
 
-  // 1) UI touch & navigation
+  // UI touch & navigation
   bool touched = (digitalRead(XPT2046_IRQ) == LOW);
   int btnCount = (CYD_State == Home ? 2 : 3);
 
@@ -168,7 +194,7 @@ void loop() {
         }
       }
       else { // Record screen
-        if (i == 0) {
+        if (i == 0 && record_data == false) {
           // Start Recording
           record_data = true;
           packet_count = 0;
@@ -183,9 +209,6 @@ void loop() {
               "rAccX,rAccY,rAccZ,"
               "rpmFront,rpmRear"
             );
-            Serial.println("Logging to " + fn);
-          } else {
-            Serial.println("Log file open failed");
           }
         }
         else if (i == 1) {
@@ -195,7 +218,6 @@ void loop() {
             logFile.flush();
             logFile.close();
           }
-          Serial.println("Recording stopped");
         }
         else if (i == 2) {
           // Back to Home
@@ -211,7 +233,7 @@ void loop() {
     }
   }
 
-  // 2) Data polling & logging
+  // Data polling & logging
   if (sample_ready) {
     sample_ready = false;
     collectData();
@@ -540,4 +562,30 @@ void calibrateSensors() {
 
   delay(1000);
   tft.fillScreen(TFT_BLACK);  // Clear before showing Home screen
+}
+
+void errorScreen () {
+  tft.fillScreen(TFT_RED);
+  tft.setCursor(LCD_WIDTH/2, LCD_HEIGHT/2);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.println("ERROR!");
+  tft.setTextSize(1);
+  tft.setCursor(19, LCD_HEIGHT/2 + 20);
+
+  switch (systemError) {
+    case SD_Card:
+      tft.println("SD Card not initialized");
+      break;
+    case TS:
+      tft.println("Touchscreen malfunction");
+      break;
+    case IMU:
+      tft.println("IMU sensor not responding");
+      break;
+    case UART:
+      tft.println("UART connection failed");
+      break;
+  }
+  while (1) {}
 }

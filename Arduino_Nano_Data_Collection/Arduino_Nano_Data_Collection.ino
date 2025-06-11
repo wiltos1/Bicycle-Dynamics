@@ -1,24 +1,7 @@
-/*
-FRONT IMU CALIBRATION:
-  Accel:       -16,  20, -14
-  Gyro:         -2,  -2,   1
-  Accel Radius: 1000
-  Mag Radius:   480
-
-REAR IMU CALIBRATION:
-  Accel:       -16,  20, -14
-  Gyro:         -2,  -2,   1
-  Accel Radius: 1000
-  Mag Radius:   480
-*/
-
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
 #include <utility/imumaths.h>
-
-#define LED_PIN   13
-#define YAW_RESET 4
 
 // --- IMU setup ---
 Adafruit_BNO055 imuFront = Adafruit_BNO055(55, 0x28);
@@ -29,12 +12,15 @@ imu::Vector<3> accelFront, accelRear;
 
 // Hall sensor pins
 constexpr uint8_t HALL_FRONT_PIN = 2;
-constexpr uint8_t HALL_REAR_PIN  = 3;
+constexpr uint8_t HALL_REAR_PIN = 3;
+constexpr uint8_t YAW_RESET = 4;
+
+volatile bool sensorError = false;
 
 // Number of magnets on wheel, for RPM calculation
 constexpr uint8_t NUM_MAGNETS = 4;
-constexpr unsigned long STOP_THRESHOLD_US = 2000000UL;
-constexpr unsigned long DEBOUNCE_US       =   2000UL;
+constexpr unsigned long STOP_THRESHOLD_US = 2000000UL; // If 2 seconds are exceeded without a magnet then we assume ZERO RPM
+constexpr unsigned long DEBOUNCE_US = 2000UL;
 
 // RPM measurement variables
 volatile unsigned long lastPulseTimeFront = 0, pulseIntervalFront = 0, lastDebounceFront = 0;
@@ -52,22 +38,15 @@ unsigned long lastResetTime = 0;
 // We’ll poll pin 4 in loop()—track its previous state here
 int lastResetPinState = HIGH;
 
-// --- CALIBRATION OFFSETS (fill these in with your values) ---
-adafruit_bno055_offsets_t frontOffsets = {
+// --- CALIBRATION OFFSETS ---
+adafruit_bno055_offsets_t sensorOffsets = {
   /* accel_offset */  -16,  20,  -14,
-  /* mag_offset   */    0,   0,    0,   // (we’re not using mag offsets here)
+  /* mag_offset   */    0,   0,    0, 
   /* gyro_offset  */   -2,  -2,    1,
   /* accel_radius */ 1000,
   /* mag_radius   */  480
 };
 
-adafruit_bno055_offsets_t rearOffsets = {
-  /* accel_offset */  -16,  20,  -14,
-  /* mag_offset   */    0,   0,    0,
-  /* gyro_offset  */   -2,  -2,    1,
-  /* accel_radius */ 1000,
-  /* mag_radius   */  480
-};
 
 // Forward declarations
 void updateRPM();
@@ -76,9 +55,6 @@ void rearPulse();
 void resetYaw();
 
 void setup() {
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
-
   // Yaw-reset “button” (we’ll poll this pin in loop())
   pinMode(YAW_RESET, INPUT_PULLUP);
   lastResetPinState = digitalRead(YAW_RESET);
@@ -88,13 +64,7 @@ void setup() {
 
   // Initialize both IMUs
   if (!imuFront.begin() || !imuRear.begin()) {
-    // if either fails, blink LED forever
-    while (1) {
-      digitalWrite(LED_PIN, HIGH);
-      delay(500);
-      digitalWrite(LED_PIN, LOW);
-      delay(500);
-    }
+    sensorError = true;
   }
 
   // Use the external 32 kHz crystal for better stability
@@ -104,18 +74,18 @@ void setup() {
 
   // Put them into CONFIG mode so we can write offsets
   imuFront.setMode(OPERATION_MODE_CONFIG);
-  imuRear .setMode(OPERATION_MODE_CONFIG);
+  imuRear.setMode(OPERATION_MODE_CONFIG);
   delay(500);
 
-  // Write your pre‐measured calibration offsets into each BNO055
-  imuFront.setSensorOffsets(frontOffsets);
-  imuRear .setSensorOffsets(rearOffsets);
+  // Write pre‐measured calibration offsets into each BNO055
+  imuFront.setSensorOffsets(sensorOffsets);
+  imuRear.setSensorOffsets(sensorOffsets);
   delay(500);
 
   // Now go into IMUPLUS mode (gyro + accel only).
   // If you want full 9-DOF fusion, replace with OPERATION_MODE_NDOF.
   imuFront.setMode(OPERATION_MODE_IMUPLUS);
-  imuRear .setMode(OPERATION_MODE_IMUPLUS);
+  imuRear.setMode(OPERATION_MODE_IMUPLUS);
   delay(500);
 
   // Setup Hall sensors for wheel RPM (they still use interrupts)
@@ -123,7 +93,7 @@ void setup() {
   pinMode(HALL_REAR_PIN,  INPUT_PULLUP);
 
   attachInterrupt(digitalPinToInterrupt(HALL_FRONT_PIN), frontPulse, FALLING);
-  attachInterrupt(digitalPinToInterrupt(HALL_REAR_PIN),  rearPulse,  FALLING);
+  attachInterrupt(digitalPinToInterrupt(HALL_REAR_PIN),  rearPulse,  CHANGE);
 }
 
 void loop() {
@@ -145,7 +115,7 @@ void loop() {
 
       // Read orientation & linear acceleration from both IMUs
       imuFront.getEvent(&frontData);
-      imuRear .getEvent(&rearData);
+      imuRear.getEvent(&rearData);
 
       accelFront = imuFront.getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
       accelRear  = imuRear .getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
@@ -161,12 +131,6 @@ void loop() {
       if (rearYaw >   180.0f)  rearYaw -= 360.0f;
       if (rearYaw <=  -180.0f) rearYaw += 360.0f;
 
-      // Send as CSV:
-      // frontYaw, frontPitch, frontRoll,
-      // rearYaw, rearPitch, rearRoll,
-      // frontAccelX, frontAccelY, frontAccelZ,
-      // rearAccelX, rearAccelY, rearAccelZ,
-      // rpmFront, rpmRear
       Serial.print(frontYaw);                       Serial.print(",");
       Serial.print(frontData.orientation.y);        Serial.print(",");
       Serial.print(frontData.orientation.z);        Serial.print(",");
@@ -194,6 +158,14 @@ void loop() {
       Serial.print(accelF); Serial.print(",");
       Serial.print(gyroR);  Serial.print(",");
       Serial.println(accelR);
+    }
+    else if (command == 'E') {
+      if (sensorError) {
+        Serial.println("ERROR");
+      }
+      else {
+        Serial.println("NO ERROR");
+      }
     }
   }
 }
