@@ -4,6 +4,9 @@
 #include <SPIFFS.h>
 #include <Ticker.h>
 #include <SD.h>
+#include <esp_now.h>
+#include <WiFi.h>
+#include <string.h>
 
 //––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
 // Constants & configuration
@@ -36,6 +39,7 @@ TFT_eSPI tft = TFT_eSPI();
 TFT_eSPI_Button buttons[6]; // Initialize buttons
 Ticker sampleTicker; // Ticker for sampling data at uniform frwquency
 File logFile;
+String lastFilename = "";
 
 // UART to Arduino Nano
 HardwareSerial SerialNano(2);
@@ -44,7 +48,7 @@ HardwareSerial SerialNano(2);
 enum State { Home, Calibrate, Record };
 State CYD_State = Home; // Start in Home State
 
-enum Error { None, SD_Card, TS, IMU, UART};
+enum Error { None, SD_Card, TS, IMU, UART, ESPNOW};
 Error systemError = None;
 
 // Labels
@@ -66,6 +70,7 @@ float rollBias = 0.0f;
 // Sampling & logging
 volatile bool sample_ready = false;
 bool record_data = false; // When this is true we write data to a new file on the SD Card
+int externalRecordData = 0; // 0 is idle state
 unsigned long packet_count = 0;
 
 // Forward declarations of functions
@@ -82,9 +87,36 @@ void updateLiveData();
 void calibrateBike(int i);
 void calibrateSensors();
 void errorScreen();
+void onESPNowReceive(const esp_now_recv_info_t *recvInfo, const uint8_t *incomingData, int len);
+void sendDataToComputer();
 
 void setup() {
   Serial.begin(57600); // Initialize Serial Monitor
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(); 
+  if (esp_now_init() != ESP_OK) {
+    systemError = ESPNOW;
+  }
+  esp_now_register_recv_cb(onESPNowReceive);
+
+  uint8_t computerMAC[] = {0xF4, 0x65, 0x0B, 0x40, 0xB7, 0x8C};
+
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, computerMAC, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+  if (!esp_now_is_peer_exist(computerMAC)) {
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+      Serial.println("Failed to add computer ESP32 peer");
+      systemError = ESPNOW;
+    } else {
+      Serial.println("Computer ESP32 peer added");
+    }
+  } else {
+    Serial.println("Computer ESP32 peer already exists");
+  }
 
   // Hardware_ UART to Nano at 57600 baud, using pins RX=22, TX=27
   SerialNano.begin(57600, SERIAL_8N1, RXD2, TXD2);
@@ -150,6 +182,34 @@ void setup() {
 
 
 void loop() {
+  if (externalRecordData == 1 && !record_data) {
+    record_data = true;
+    packet_count = 0;
+    lastFilename = generateFilename();
+    logFile = SD.open(lastFilename.c_str(), FILE_WRITE);
+    if (logFile) {
+      logFile.println(
+        "time_us,"
+        "fOriX,fOriY,fOriZ,"
+        "rOriX,rOriY,rOriZ,"
+        "fAccX,fAccY,fAccZ,"
+        "rAccX,rAccY,rAccZ,"
+        "rpmFront,rpmRear"
+      );
+    }
+    externalRecordData = 0;
+  }
+
+  if (externalRecordData == 2 && record_data) {
+    record_data = false;
+    if (logFile) {
+      logFile.flush();
+      logFile.close();
+    }
+    sendDataToComputer();
+    externalRecordData = 0;
+  }
+
   writeContext(); // This writes different text to the screen depending on the state, to help user interraction
 
   // If we’re in Record state, periodically update live data on screen
@@ -194,11 +254,12 @@ void loop() {
         }
       }
       else { // Record screen
-        if (i == 0 && record_data == false) {
+        if (i == 0  && record_data == false) {
           // Start Recording
           record_data = true;
           packet_count = 0;
-          String fn = generateFilename();
+          lastFilename = generateFilename();
+          String fn = lastFilename;
           logFile = SD.open(fn.c_str(), FILE_WRITE);
           if (logFile) {
             logFile.println(
@@ -211,7 +272,7 @@ void loop() {
             );
           }
         }
-        else if (i == 1) {
+        else if (i == 1 && record_data == true) {
           // Stop & Save
           record_data = false;
           if (logFile) {
@@ -586,6 +647,106 @@ void errorScreen () {
     case UART:
       tft.println("UART connection failed");
       break;
+    case ESPNOW:
+      tft.println("ESPNOW Connection failed");
+      break;
   }
   while (1) {}
+}
+
+void onESPNowReceive(const esp_now_recv_info_t *recvInfo, const uint8_t *incomingData, int len) {
+  String command = String((char*)incomingData).substring(0, len);
+  command.trim();
+
+  if (command == "START") {
+    externalRecordData = 1;
+  }
+  else if (command == "STOP") {
+    externalRecordData = 2;
+  }
+}
+
+void sendToComputerESP32(const String &msg) {
+  uint8_t computerMAC[] = {0xF4, 0x65, 0x0B, 0x40, 0xB7, 0x8C};
+  esp_now_send(computerMAC, (uint8_t*)msg.c_str(), msg.length());
+  delay(2); // Optional: allow receiving ESP32 to keep up
+}
+
+void sendDataToComputer() {
+  if (lastFilename == "") {
+    Serial.println("❌ No last file to send");
+    return;
+  }
+
+  File file = SD.open(lastFilename, FILE_READ);
+  if (!file) {
+    Serial.println("❌ Failed to open last log file");
+    return;
+  }
+
+  // Read and tokenize the header
+  String headerLine = file.readStringUntil('\n');
+  char* header_copy = strdup(headerLine.c_str());
+  char* token = strtok(header_copy, ",");
+
+  int timeIdx = -1, fxIdx = -1, rxIdx = -1, fzIdx = -1, rzIdx = -1;
+  int index = 0;
+
+  while (token) {
+    String col = String(token);
+    col.trim();
+    if (col == "time_us") timeIdx = index;
+    else if (col == "fOriX") fxIdx = index;
+    else if (col == "rOriX") rxIdx = index;
+    else if (col == "fOriZ") fzIdx = index;
+    else if (col == "rOriZ") rzIdx = index;
+    token = strtok(NULL, ",");
+    index++;
+  }
+
+  free(header_copy); // 🧼 Free the allocated memory
+
+  if (timeIdx == -1 || fxIdx == -1 || rxIdx == -1 || fzIdx == -1 || rzIdx == -1) {
+    Serial.println("❌ Missing required columns in CSV");
+    file.close();
+    return;
+  }
+
+  // Send the filename first
+  sendToComputerESP32("FILENAME:" + lastFilename);
+
+  // Now read and send each value line by line
+  while (file.available()) {
+    String line = file.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0) continue;
+
+    String fields[20];
+    int count = 0;
+    int start = 0;
+    for (int i = 0; i < line.length(); i++) {
+      if (line[i] == ',') {
+        fields[count++] = line.substring(start, i);
+        start = i + 1;
+      }
+    }
+    fields[count++] = line.substring(start); // last field
+
+    int maxIdx = timeIdx;
+    maxIdx = max(maxIdx, fxIdx);
+    maxIdx = max(maxIdx, rxIdx);
+    maxIdx = max(maxIdx, fzIdx);
+    maxIdx = max(maxIdx, rzIdx);
+    if (count <= maxIdx) continue;
+
+
+    sendToComputerESP32("COLUMN:time_us," + fields[timeIdx]);
+    sendToComputerESP32("COLUMN:frontOriX," + fields[fxIdx]);
+    sendToComputerESP32("COLUMN:rearOriX," + fields[rxIdx]);
+    sendToComputerESP32("COLUMN:frontOriZ," + fields[fzIdx]);
+    sendToComputerESP32("COLUMN:rearOriZ," + fields[rzIdx]);
+  }
+
+  file.close();
+  sendToComputerESP32("✅ DONE");
 }
