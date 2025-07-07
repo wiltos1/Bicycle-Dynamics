@@ -1,0 +1,3 @@
+[submodule "Bicycle-Dynamics"]
+	path = Bicycle-Dynamics
+	url = https://github.com/wiltos1/Bicycle-Dynamics
