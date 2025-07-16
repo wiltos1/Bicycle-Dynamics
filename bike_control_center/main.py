@@ -1,4 +1,3 @@
-
 import serial
 import keyboard
 import time
@@ -45,7 +44,6 @@ def read_serial():
                     continue
                 print(f"<< {line}")
                 if line.startswith("FILENAME:"):
-                    # Strip leading slash from bike filename
                     raw = line.split(':',1)[1]
                     fname = raw.lstrip('/')
                     current_filename = fname
@@ -57,11 +55,10 @@ def read_serial():
                         key, value = rest.split(',', 1)
                         value = float(value)
                         data_columns[key].append(value)
-                        print(f"📊 Added {key}: {value} to data_columns")
-
-                        # Check if yaw can be computed
+                        print(f"📊 Added {key}: {value}")
+                        # Compute yaw when possible
                         if all(k in data_columns for k in ('frontOriX', 'rearOriX', 'time_us')):
-                            i = len(data_columns['yaw'])  # Next yaw index
+                            i = len(data_columns['yaw'])
                             while (
                                 i < len(data_columns['frontOriX']) and
                                 i < len(data_columns['rearOriX']) and
@@ -84,7 +81,7 @@ def read_serial():
 def serial_listener_thread():
     threading.Thread(target=read_serial, daemon=True).start()
 
-# --- Keyboard Controls (toggle on '1') ---
+# --- Keyboard Controls ---
 def keyboard_controls_thread(selected_filename, entry_name, update_buttons):
     def loop():
         warning_shown = False
@@ -97,27 +94,23 @@ def keyboard_controls_thread(selected_filename, entry_name, update_buttons):
                     global is_old_file_loaded
                     if is_old_file_loaded:
                         if not warning_shown:
-                            messagebox.showwarning(
-                                "Old File Open",
-                                "Please close the current file before starting a new recording."
-                            )
+                            messagebox.showwarning("Old File Open",
+                                "Please close the current file before starting a new recording.")
                             warning_shown = True
                         keyboard.wait('1')
                         continue
                     if selected_filename.get() and not entry_name.get().strip():
                         if not warning_shown:
-                            messagebox.showwarning(
-                                "Unsaved Ride",
-                                "Please save or discard the current ride before starting a new recording."
-                            )
+                            messagebox.showwarning("Unsaved Ride",
+                                "Please save or discard the current ride before starting a new recording.")
                             warning_shown = True
                         keyboard.wait('1')
                         continue
                     warning_shown = False
                     send_command("START")
                     recording_flag.set()
-                    is_old_file_loaded = False  # Reset flag for new recording
-                    update_buttons()  # Restore Save and Discard
+                    is_old_file_loaded = False
+                    update_buttons()
                 keyboard.wait('1')
             if keyboard.is_pressed('esc'):
                 break
@@ -130,27 +123,22 @@ def load_file(path, entry_name, text_notes):
     try:
         with open(path) as fh:
             reader = csv.DictReader(fh)
-            # Get the first row to extract Ride Name and Notes
             first_row = next(reader)
             ride_name = first_row.get('Ride Name', '')
             notes = first_row.get('Notes', '')
-            # Update UI with Ride Name and Notes
             entry_name.delete(0, tk.END)
             entry_name.insert(0, ride_name)
             text_notes.delete('1.0', tk.END)
             text_notes.insert('1.0', notes)
-            # Reset file pointer to start for data reading
             fh.seek(0)
             reader = csv.DictReader(fh)
             for row in reader:
-                try:
-                    data_columns['time_us'].append(float(row['Time (s)'])*1e6)
-                    data_columns['yaw'].append(float(row.get('Yaw', '0')))
-                    data_columns['frontOriZ'].append(float(row.get('Front Roll', '0')))
-                    data_columns['rearOriZ'].append(float(row.get('Rear Roll', '0')))
-                except ValueError as e:
-                    print(f"⚠️ Skipping invalid row in {path}: {row} — {e}")
-            print(f"Loaded data from {path}: {len(data_columns['time_us'])} rows")
+                data_columns['time_us'].append(float(row['Time (s)']) * 1e6)
+                data_columns['yaw'].append(float(row.get('Yaw', '0')))
+                data_columns['frontOriZ'].append(float(row.get('Front Roll', '0')))
+                data_columns['rearOriZ'].append(float(row.get('Rear Roll', '0')))
+                data_columns['frontRPM'].append(float(row.get('Front RPM', '0')))
+            print(f"Loaded data: {len(data_columns['time_us'])} rows")
     except Exception as e:
         print(f"Error loading file: {e}")
         messagebox.showerror("Error", f"Failed to load file: {e}")
@@ -164,51 +152,49 @@ def launch_control_center():
     selected_filename = tk.StringVar()
     recording_label = tk.StringVar()
 
-    # Matplotlib setup
-    fig, ax = plt.subplots(figsize=(10,6))
+    # Matplotlib setup with two subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    fig.subplots_adjust(hspace=0.4)
     canvas = FigureCanvasTkAgg(fig, master=None)
 
     # Checkbox vars
     var_yaw = tk.BooleanVar(value=True)
     var_fr = tk.BooleanVar(value=True)
     var_rr = tk.BooleanVar(value=True)
+    var_rpm = tk.BooleanVar(value=True)
 
     def update_time_plot():
-        ax.clear()
+        ax1.clear()
+        ax2.clear()
         times = data_columns.get('time_us', [])
         if not times:
             canvas.draw()
             return
-
         base = times[0]
-        ts = [(t - base) / 1e6 for t in times]
+        ts = [(t - base)/1e6 for t in times]
 
-        print(f"🟦 Plotting time_us: {len(ts)} samples")
-        if var_yaw.get():
-            print(f"🟨 Yaw enabled: {len(data_columns['yaw'])} samples")
-        if var_fr.get():
-            print(f"🟩 Front Roll: {len(data_columns['frontOriZ'])} samples")
-        if var_rr.get():
-            print(f"🟥 Rear Roll: {len(data_columns['rearOriZ'])} samples")
-
+        # Plot yaw/roll on ax1
         if var_yaw.get() and data_columns.get('yaw'):
             min_len = min(len(ts), len(data_columns['yaw']))
-            print(f"🌀 Plotting Yaw with {min_len} points")
-            ax.plot(ts[:min_len], data_columns['yaw'][:min_len], label='Yaw')
-
+            ax1.plot(ts[:min_len], data_columns['yaw'][:min_len], label='Yaw')
         if var_fr.get() and data_columns.get('frontOriZ'):
             min_len = min(len(ts), len(data_columns['frontOriZ']))
-            ax.plot(ts[:min_len], data_columns['frontOriZ'][:min_len], label='Front Roll')
-
+            ax1.plot(ts[:min_len], data_columns['frontOriZ'][:min_len], label='Front Roll')
         if var_rr.get() and data_columns.get('rearOriZ'):
             min_len = min(len(ts), len(data_columns['rearOriZ']))
-            ax.plot(ts[:min_len], data_columns['rearOriZ'][:min_len], label='Rear Roll')
+            ax1.plot(ts[:min_len], data_columns['rearOriZ'][:min_len], label='Rear Roll')
+        ax1.set_ylabel('Angle (°)')
+        ax1.legend(loc='upper right')
 
-        ax.set_xlabel('Time (s)')
-        ax.set_ylabel('Angle (°)')
-        ax.legend()
+        # Plot front RPM on ax2
+        if var_rpm.get() and data_columns.get('frontRPM'):
+            min_len = min(len(ts), len(data_columns['frontRPM']))
+            ax2.plot(ts[:min_len], data_columns['frontRPM'][:min_len], label='Front RPM')
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('RPM')
+        ax2.legend(loc='upper right')
+
         canvas.draw()
-
 
     def update_recording_label():
         recording_label.set("🔴 Recording in Progress" if recording_flag.is_set() else "")
@@ -358,13 +344,12 @@ def launch_control_center():
 
     # Checkboxes
     cbf = tk.Frame(right)
-    cbf.pack()
+    cbf.pack(pady=(5,10), anchor='center')
     chk_yaw = tk.Checkbutton(cbf, text='Yaw', variable=var_yaw, command=update_time_plot)
     chk_fr  = tk.Checkbutton(cbf, text='Front Roll', variable=var_fr, command=update_time_plot)
     chk_rr  = tk.Checkbutton(cbf, text='Rear Roll', variable=var_rr, command=update_time_plot)
-    chk_yaw.pack(side=tk.LEFT)
-    chk_fr.pack(side=tk.LEFT)
-    chk_rr.pack(side=tk.LEFT)
+    chk_rpm = tk.Checkbutton(cbf, text='Front RPM', variable=var_rpm, command=update_time_plot)
+    for chk in (chk_yaw, chk_fr, chk_rr, chk_rpm): chk.pack(side=tk.LEFT)
 
     file_label_frame = tk.Frame(right)
     file_label_frame.pack(anchor='w', pady=(10, 0))

@@ -394,7 +394,7 @@ void writeContext() {
 void updateLiveData() {
   tft.setCursor(10, 60);
   char buffer[22];
-  snprintf(buffer, sizeof(buffer), "RPM: %.2f", rpm_rear);
+  snprintf(buffer, sizeof(buffer), "RPM: %.2f", rpm_front);
   tft.println(buffer);
 
   tft.setCursor(10, 80);
@@ -689,7 +689,7 @@ void sendDataToComputer() {
   char* header_copy = strdup(headerLine.c_str());
   char* token = strtok(header_copy, ",");
 
-  int timeIdx = -1, fxIdx = -1, rxIdx = -1, fzIdx = -1, rzIdx = -1;
+  int timeIdx = -1, fxIdx = -1, rxIdx = -1, fzIdx = -1, rzIdx = -1, fRpm = -1;
   int index = 0;
 
   while (token) {
@@ -700,13 +700,14 @@ void sendDataToComputer() {
     else if (col == "rOriX") rxIdx = index;
     else if (col == "fOriZ") fzIdx = index;
     else if (col == "rOriZ") rzIdx = index;
+    else if (col == "rpmFront") fRpm = index;
     token = strtok(NULL, ",");
     index++;
   }
 
   free(header_copy); // 🧼 Free the allocated memory
 
-  if (timeIdx == -1 || fxIdx == -1 || rxIdx == -1 || fzIdx == -1 || rzIdx == -1) {
+  if (timeIdx == -1 || fxIdx == -1 || rxIdx == -1 || fzIdx == -1 || rzIdx == -1 || fRpm == -1) {
     Serial.println("❌ Missing required columns in CSV");
     file.close();
     return;
@@ -721,7 +722,7 @@ void sendDataToComputer() {
     line.trim();
     if (line.length() == 0) continue;
 
-    String fields[20];
+    String fields[28];
     int count = 0;
     int start = 0;
     for (int i = 0; i < line.length(); i++) {
@@ -737,6 +738,7 @@ void sendDataToComputer() {
     maxIdx = max(maxIdx, rxIdx);
     maxIdx = max(maxIdx, fzIdx);
     maxIdx = max(maxIdx, rzIdx);
+    maxIdx = max(maxIdx, fRpm);
     if (count <= maxIdx) continue;
 
 
@@ -745,6 +747,7 @@ void sendDataToComputer() {
     sendToComputerESP32("COLUMN:rearOriX," + fields[rxIdx]);
     sendToComputerESP32("COLUMN:frontOriZ," + fields[fzIdx]);
     sendToComputerESP32("COLUMN:rearOriZ," + fields[rzIdx]);
+    sendToComputerESP32("COLUMN:frontRPM," + fields[fRpm]);
   }
 
   file.close();
