@@ -58,7 +58,7 @@ char recLabels [3][24] = { "Start New", "Stop&Save", "Home" };
 
 // Sensor data from Nano 
 float frontOriX, frontOriY, frontOriZ;
-float rearOriX,  rearOriY,  rearOriZ;
+float yaw,  rearOriY,  rearOriZ;
 float frontAccX, frontAccY, frontAccZ;
 float rearAccX,  rearAccY,  rearAccZ;
 float rpm_front, rpm_rear;
@@ -191,7 +191,7 @@ void loop() {
       logFile.println(
         "time_us,"
         "fOriX,fOriY,fOriZ,"
-        "rOriX,rOriY,rOriZ,"
+        "yaw,rOriY,rOriZ,"
         "fAccX,fAccY,fAccZ,"
         "rAccX,rAccY,rAccZ,"
         "rpmFront,rpmRear"
@@ -265,7 +265,7 @@ void loop() {
             logFile.println(
               "time_us,"
               "fOriX,fOriY,fOriZ,"
-              "rOriX,rOriY,rOriZ,"
+              "yaw,rOriY,rOriZ,"
               "fAccX,fAccY,fAccZ,"
               "rAccX,rAccY,rAccZ,"
               "rpmFront,rpmRear"
@@ -402,7 +402,7 @@ void updateLiveData() {
   tft.println(buffer);
 
   tft.setCursor(10, 100);
-  snprintf(buffer, sizeof(buffer), "Absolute Yaw: %.2f", frontOriX - rearOriX);
+  snprintf(buffer, sizeof(buffer), "Absolute Yaw: %.2f", yaw);
   tft.println(buffer);
 
   tft.setCursor(10, 120);
@@ -444,7 +444,7 @@ void collectData() {
   frontOriX  = v[0];
   frontOriY  = v[1] - pitchBias;
   frontOriZ  = v[2] - rollBias;
-  rearOriX   = v[3];
+  yaw   = v[3];
   rearOriY   = v[4] - pitchBias;
   rearOriZ   = v[5] - rollBias;
   frontAccX  = v[6];
@@ -466,7 +466,7 @@ void SDCardWrite() {
     "%lu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
     ts,
     frontOriX, frontOriY, frontOriZ,
-    rearOriX,  rearOriY,  rearOriZ,
+    yaw,  rearOriY,  rearOriZ,
     frontAccX, frontAccY, frontAccZ,
     rearAccX,  rearAccY,  rearAccZ,
     rpm_front, rpm_rear
@@ -697,7 +697,7 @@ void sendDataToComputer() {
     col.trim();
     if (col == "time_us") timeIdx = index;
     else if (col == "fOriX") fxIdx = index;
-    else if (col == "rOriX") rxIdx = index;
+    else if (col == "yaw") rxIdx = index;
     else if (col == "fOriZ") fzIdx = index;
     else if (col == "rOriZ") rzIdx = index;
     else if (col == "rpmFront") fRpm = index;
@@ -744,7 +744,7 @@ void sendDataToComputer() {
 
     sendToComputerESP32("COLUMN:time_us," + fields[timeIdx]);
     sendToComputerESP32("COLUMN:frontOriX," + fields[fxIdx]);
-    sendToComputerESP32("COLUMN:rearOriX," + fields[rxIdx]);
+    sendToComputerESP32("COLUMN:yaw," + fields[rxIdx]);
     sendToComputerESP32("COLUMN:frontOriZ," + fields[fzIdx]);
     sendToComputerESP32("COLUMN:rearOriZ," + fields[rzIdx]);
     sendToComputerESP32("COLUMN:frontRPM," + fields[fRpm]);
