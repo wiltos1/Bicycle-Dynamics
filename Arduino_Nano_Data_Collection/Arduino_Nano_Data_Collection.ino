@@ -27,10 +27,10 @@ volatile unsigned long lastPulseTimeFront = 0, pulseIntervalFront = 0, lastDebou
 volatile unsigned long lastPulseTimeRear  = 0, pulseIntervalRear  = 0, lastDebounceRear  = 0;
 
 float rpmFront = 0, rpmRear = 0;
-float yaw = 0;
 
 // Yaw biases (to zero‐out each IMU’s heading on button‐press)
-float yawBias = 0;
+float frontYawBias = 0;
+float rearYawBias  = 0;
 
 // Keep track of last time we actually zeroed the yaw (ms)
 unsigned long lastResetTime = 0;
@@ -121,16 +121,20 @@ void loop() {
       accelRear  = imuRear .getVector(Adafruit_BNO055::VECTOR_LINEARACCEL);
 
       // Subtract each IMU’s bias from its current heading
-      yaw = frontData.orientation.x - rearData.orientation.x - yawBias;
+      float frontYaw = frontData.orientation.x - frontYawBias;
+      float rearYaw  = rearData.orientation.x  - rearYawBias;
 
       // --- Wrap into –180…+180 ---
-      if (yaw >  180.0f)  yaw -= 360.0f;
-      if (yaw) <= -180.0f) yaw += 360.0f;
+      if (frontYaw >  180.0f)  frontYaw -= 360.0f;
+      if (frontYaw <= -180.0f) frontYaw += 360.0f;
 
-      Serial.print(frontData.orientation.x);                       Serial.print(",");
+      if (rearYaw >   180.0f)  rearYaw -= 360.0f;
+      if (rearYaw <=  -180.0f) rearYaw += 360.0f;
+
+      Serial.print(frontYaw);                       Serial.print(",");
       Serial.print(frontData.orientation.y);        Serial.print(",");
       Serial.print(frontData.orientation.z);        Serial.print(",");
-      Serial.print(yaw);                        Serial.print(",");
+      Serial.print(rearYaw);                        Serial.print(",");
       Serial.print(rearData.orientation.y);         Serial.print(",");
       Serial.print(rearData.orientation.z);         Serial.print(",");
       Serial.print(accelFront.x());                 Serial.print(",");
@@ -214,5 +218,6 @@ void resetYaw() {
   imuFront.getEvent(&frontData);
   imuRear .getEvent(&rearData);
 
-  yawBias = frontData.orientation.x - rearData.orientation.x;
+  frontYawBias = frontData.orientation.x;
+  rearYawBias  = rearData.orientation.x;
 }

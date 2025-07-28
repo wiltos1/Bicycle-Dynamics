@@ -56,9 +56,22 @@ def read_serial():
                         value = float(value)
                         data_columns[key].append(value)
                         print(f"📊 Added {key}: {value}")
+                        # Compute yaw when possible
+                        if all(k in data_columns for k in ('frontOriX', 'rearOriX', 'time_us')):
+                            i = len(data_columns['yaw'])
+                            while (
+                                i < len(data_columns['frontOriX']) and
+                                i < len(data_columns['rearOriX']) and
+                                i < len(data_columns['time_us'])
+                            ):
+                                f = data_columns['frontOriX'][i]
+                                r = data_columns['rearOriX'][i]
+                                yaw_val = f - r
+                                data_columns['yaw'].append(yaw_val)
+                                print(f"🌀 Computed yaw[{i}]: {yaw_val}")
+                                i += 1
                     except Exception as e:
                         print(f"⚠️ Bad column line: {line} — {e}")
-
                 elif "DONE" in line:
                     serial_queue.put(("DATA_COMPLETE", current_filename))
         except Exception as e:
@@ -389,10 +402,10 @@ def on_save(entry, notes, sel_var, refresh_fn, plot_fn):
             w = csv.writer(fh)
             w.writerow(["Time (s)","Yaw","Front Roll","Rear Roll","Ride Name","Notes"])
             for i, t0 in enumerate(data_columns['time_us']):
-                ts = (t0 - base) / 1e6
-                yaw = data_columns['yaw'][i] if i < len(data_columns['yaw']) else 0.0
-                fr  = data_columns['frontOriZ'][i] if i < len(data_columns['frontOriZ']) else 0.0
-                rr  = data_columns['rearOriZ'][i] if i < len(data_columns['rearOriZ']) else 0.0
+                ts = (t0-base)/1e6
+                yaw = data_columns['frontOriX'][i] - data_columns['rearOriX'][i] if i < len(data_columns['frontOriX']) and i < len(data_columns['rearOriX']) else 0.0
+                fr = data_columns['frontOriZ'][i] if i < len(data_columns['frontOriZ']) else 0.0
+                rr = data_columns['rearOriZ'][i] if i < len(data_columns['rearOriZ']) else 0.0
                 w.writerow([ts, yaw, fr, rr, rn, notes.get('1.0', tk.END).strip()])
         messagebox.showinfo("Saved", f"Saved to {path}")
         refresh_fn()
